@@ -100,6 +100,8 @@ identity and execution fields (`ticker`, `entry_price`, `quantity`, `trade date`
 The workflow updates these agent-owned columns in the same CSV after a successful
 run: `current price`, `days high`, `days low`, `net change %`, `market session`,
 `pnl`, `pnl %`, `technical sentiment`, `breaking news analysis`, and `risk tier`.
+Before any successful CSV replacement, the previous file is copied to a sibling
+backup named `<filename>.csv.backup`. These backups are ignored by git.
 
 For a buy (`B`), PnL rises when the live price is above entry. For a sell (`S`),
 PnL rises when the live price is below entry. `commission+STT` is deducted by the

@@ -5,6 +5,7 @@ __pycache__/
 
 # User portfolio inputs are local and must not be committed.
 positions*.csv
+positions*.csv.backup
 !examples/open_positions.template.csv
 
 # C extensions

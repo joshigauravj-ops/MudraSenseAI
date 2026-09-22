@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import csv
 import os
+import shutil
 import subprocess
 import sys
 from decimal import Decimal
@@ -190,9 +191,55 @@ def load_positions_csv(path: Path) -> list[OpenTradePosition]:
     return positions
 
 
+def read_positions_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Read raw CSV rows for the dashboard editor without changing values."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Positions CSV not found: {path}")
+    with path.open(newline="", encoding="utf-8-sig") as csv_file:
+        reader = csv.DictReader(csv_file)
+        headers = list(reader.fieldnames or [])
+        if not headers:
+            raise ValueError("CSV must contain a header row")
+        return headers, [dict(row) for row in reader]
+
+
+def write_user_csv_rows(
+    path: Path,
+    headers: list[str],
+    rows: list[dict[str, object]],
+) -> None:
+    """Validate and atomically save dashboard-edited CSV rows."""
+    temporary_path = path.with_suffix(f"{path.suffix}.edit.tmp")
+    with temporary_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(
+            {
+                header: _format_csv_value(row.get(header, ""))
+                for header in headers
+            }
+            for row in rows
+        )
+
+    try:
+        load_positions_csv(temporary_path)
+        _backup_csv(path)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
 def _format_csv_value(value: object) -> str:
     """Serialize Decimal and scalar model values without locale formatting."""
     return str(value) if value is not None else ""
+
+
+def _backup_csv(path: Path) -> Path:
+    """Copy the current CSV to a sibling backup before replacing it."""
+    backup_path = path.with_name(f"{path.name}.backup")
+    shutil.copy2(path, backup_path)
+    return backup_path
 
 
 def write_agent_results_csv(path: Path, result: AgenticResult) -> None:
@@ -272,6 +319,7 @@ def write_agent_results_csv(path: Path, result: AgenticResult) -> None:
         writer = csv.DictWriter(csv_file, fieldnames=headers, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    _backup_csv(path)
     temporary_path.replace(path)
 
 
