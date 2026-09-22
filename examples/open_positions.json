@@ -1,0 +1,79 @@
+{
+  "positions": [
+    {
+      "user_input": {
+        "ticker": "RELIANCE.NS",
+        "entry_price": 2865.50,
+        "quantity": 10,
+        "transaction_date": "2026-09-01"
+      },
+      "live_market": {
+        "current_price": 2912.75,
+        "days_high": 2930.00,
+        "days_low": 2848.40,
+        "volatility_index": 13.42,
+        "net_change_percent": 0.86,
+        "total_invested_capital": 28655.00
+      },
+      "current_valuation": {
+        "absolute_pnl_inr": 472.50,
+        "percentage_pnl": 1.65
+      },
+      "agent_evaluation": {
+        "technical_sentiment_summary": "Constructive momentum above the recent support zone.",
+        "breaking_news_analysis": "No material negative corporate headline in the latest review.",
+        "risk_tier": "Medium"
+      }
+    },
+    {
+      "user_input": {
+        "ticker": "TCS.NS",
+        "entry_price": 3890.00,
+        "quantity": 5,
+        "transaction_date": "2026-08-18"
+      },
+      "live_market": {
+        "current_price": 3824.50,
+        "days_high": 3859.90,
+        "days_low": 3792.10,
+        "volatility_index": 13.42,
+        "net_change_percent": -0.42,
+        "total_invested_capital": 19450.00
+      },
+      "current_valuation": {
+        "absolute_pnl_inr": -327.50,
+        "percentage_pnl": -1.68
+      },
+      "agent_evaluation": {
+        "technical_sentiment_summary": "Short-term trend is range-bound with mild downside pressure.",
+        "breaking_news_analysis": "Monitor technology spending commentary and large deal updates.",
+        "risk_tier": "Medium"
+      }
+    },
+    {
+      "user_input": {
+        "ticker": "INFY.NS",
+        "entry_price": 1712.25,
+        "quantity": 8,
+        "transaction_date": "2026-09-10"
+      },
+      "live_market": {
+        "current_price": 1680.00,
+        "days_high": 1698.75,
+        "days_low": 1662.30,
+        "volatility_index": 13.42,
+        "net_change_percent": -0.95,
+        "total_invested_capital": 13698.00
+      },
+      "current_valuation": {
+        "absolute_pnl_inr": -258.00,
+        "percentage_pnl": -1.88
+      },
+      "agent_evaluation": {
+        "technical_sentiment_summary": "Weak near-term price action below the entry level.",
+        "breaking_news_analysis": "Review currency sensitivity and global IT demand signals.",
+        "risk_tier": "High"
+      }
+    }
+  ]
+}

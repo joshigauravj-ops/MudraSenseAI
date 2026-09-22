@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# User portfolio inputs are local and must not be committed.
+positions*.csv
+!examples/open_positions.template.csv
+
 # C extensions
 *.so
 
