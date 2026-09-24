@@ -1,4 +1,4 @@
-ticker,entry_price,quantity,current price,target price,target profit,target holding,trade date,strike price,action (B/S),commission+STT,pnl
-RELIANCE.NS,2865.50,10,2912.75,3100.00,2345.00,30D,2026-09-01,,B,25.00,
-TCS.NS,3890.00,5,3824.50,4200.00,1550.00,60D,2026-08-18,,B,18.50,
-INFY.NS,1712.25,8,1680.00,1850.00,1102.00,long-term,2026-09-10,,B,22.00,
+ticker,entry_price,quantity,target price,target profit %,target holding,stop loss,trade date,action (B/S),commission+STT
+RELIANCE.NS,2865.50,10,3100.00,10%,30D,2700.00,2026-09-01,B,25.00
+TCS.NS,3890.00,5,4200.00,10%,60D,3700.00,2026-08-18,B,18.50
+INFY.NS,1712.25,8,1850.00,10%,long-term,1600.00,2026-09-10,B,22.00

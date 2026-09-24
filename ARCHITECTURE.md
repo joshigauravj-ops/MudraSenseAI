@@ -29,7 +29,7 @@ flowchart LR
     T --> G[LangGraph state]
     N --> G
     G --> R{Supervisor guardrail}
-    R -->|No trigger| O[Persist outputs to CSV]
+    R -->|No trigger| O[Persist stable and qualitative outputs]
     R -->|Loss or volatility trigger| K[Risk Control Agent]
     K --> W[Mock urgent webhook banner]
     W --> O
@@ -58,7 +58,7 @@ The loader normalizes symbols such as `RELIANCE` to `RELIANCE.NS` and validates 
 - `target price`
 - `target profit`
 - `target holding`
-- Related trade fields such as action, strike price, and commission/STT
+- Related trade fields such as action and commission/STT
 
 Invalid rows stop the workflow before any network or agent activity begins.
 
@@ -103,17 +103,36 @@ The supervisor iterates over every open lot and evaluates deterministic conditio
 
 A triggered portfolio routes to the Risk Control Agent. The agent drafts qualitative reasoning from supervisor-owned facts. Python calculates the total current loss and creates a typed `RiskAlertPayload`. The current webhook implementation prints an urgent banner; production endpoints can be added behind the same boundary.
 
-### Step 6: Persist outputs
+Target and stop-loss checks are deterministic and run after every successful
+price/PnL refresh. A buy hits its target when price is at or above the target
+price, and hits its stop when price is at or below the stop-loss price; sell
+positions use inverse comparisons. A target or target-profit hit sets the runtime
+risk tier to `Low`, while a stop-loss hit sets it to `High`. These are report and
+alert state changes only; the system does not submit orders.
 
-After a successful workflow, agent-owned fields are written back to the same CSV:
+When a target price is absent, Python derives it from the target PnL percentage,
+entry price, quantity, and commission/STT. The derived target is runtime state
+used by reports and trigger checks; the user CSV remains unchanged.
 
-- Current market values and session status
-- Authoritative PnL and PnL percentage
+Market retrieval retries transient failures three times by default. Deterministic
+PnL calculation also has a bounded retry path so a single failed calculation does
+not discard an otherwise valid market snapshot. Both retry counts and the delay
+are configurable through environment variables.
+
+### Step 6: Persist stable outputs
+
+After a successful workflow, only qualitative agent fields are written back to the
+same CSV:
+
 - Technical summary
 - Breaking-news analysis
 - Risk tier
 
 Target-prefixed columns and user trade inputs are never used as write targets. Rows are matched by input order, which preserves repeated ticker lots safely.
+Current market values, session status, and authoritative PnL remain in the
+in-memory refresh result so frequent market refreshes do not rewrite the input
+CSV. The CLI `--report` option exposes those values on demand without invoking
+agents or persisting them.
 
 ## 5. Where RAG Fits
 

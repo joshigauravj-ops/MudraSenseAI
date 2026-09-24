@@ -9,6 +9,7 @@ from pathlib import Path
 import streamlit as st
 
 from main import (
+    calculate_target_price,
     load_positions_csv,
     read_positions_csv_rows,
     refresh_positions,
@@ -83,8 +84,8 @@ try:
             "ticker": st.column_config.TextColumn("Ticker (.NS)"),
             "entry_price": st.column_config.NumberColumn("Entry Price (INR)", min_value=0),
             "quantity": st.column_config.NumberColumn("Quantity", min_value=1, step=1),
-            "trade date": st.column_config.DateColumn("Trade Date"),
-            "transaction_date": st.column_config.DateColumn("Transaction Date"),
+            "trade date": st.column_config.TextColumn("Trade Date"),
+            "transaction_date": st.column_config.TextColumn("Transaction Date"),
         },
     )
     st.caption("Click column headers to sort. Use the table controls to add or remove rows.")
@@ -113,7 +114,7 @@ try:
                     )
                 write_agent_results_csv(input_path, agentic_result)
                 st.session_state["agentic_result"] = agentic_result
-                st.success("Workflow completed and agent-owned fields were written to CSV.")
+                st.success("Workflow completed. Stable agent analysis was written to CSV; volatile market values remain in this report.")
             except Exception as exc:
                 st.error(f"Workflow did not start or save: {exc}")
 except Exception as exc:
@@ -131,15 +132,24 @@ if result is not None:
             {
                 "Ticker": ticker,
                 "Current Price (INR)": position.live_market.current_price,
+                "Day High (INR)": position.live_market.days_high,
+                "Day Low (INR)": position.live_market.days_low,
+                "Net Change (%)": position.live_market.net_change_percent,
                 "Entry Price (INR)": position.user_input.entry_price,
                 "Quantity": position.user_input.quantity,
                 "Action": position.user_input.action,
-                "Target Price (INR)": position.user_input.target_price,
+                "Target Price (INR)": calculate_target_price(position),
+                "Target Profit (%)": position.user_input.target_profit_percent,
+                "Stop Loss (INR)": position.user_input.stop_loss_price,
                 "PnL (INR)": position.current_valuation.absolute_pnl_inr,
                 "PnL (%)": position.current_valuation.percentage_pnl,
+                "Trigger": position.trigger.status,
+                "Trigger Detail": position.trigger.reason,
                 "Market Session": metrics["market_session"] if metrics else "Unavailable",
+                "Captured At": metrics["captured_at"] if metrics else "Unavailable",
                 "Technical Summary": position.agent_evaluation.technical_sentiment_summary,
                 "News Analysis": position.agent_evaluation.breaking_news_analysis,
+                "Risk Tier": position.agent_evaluation.risk_tier,
             }
         )
 

@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict, cast
@@ -19,8 +20,10 @@ from market_tools import (
     MarketMovementMetrics,
     fetch_breaking_news,
     fetch_market_movement,
+    calculate_target_price,
     normalize_nse_ticker,
     update_position_pnl,
+    evaluate_position_trigger,
 )
 from schemas.positions import OpenTradePosition
 from analysis_graph import (
@@ -44,9 +47,9 @@ class PositionCsvRow(TypedDict):
     transaction_date: str
     current_price: str
     target_price: str
-    target_profit: str
+    target_profit_percent: str
     target_holding: str
-    strike_price: str
+    stop_loss_price: str
     action: str
     commission_stt: str
     pnl: str
@@ -68,14 +71,7 @@ class AgenticResult(TypedDict):
     errors: list[str]
 
 
-_OUTPUT_COLUMNS = [
-    "current price",
-    "days high",
-    "days low",
-    "net change %",
-    "market session",
-    "pnl",
-    "pnl %",
+_AGENT_OUTPUT_COLUMNS = [
     "technical sentiment",
     "breaking news analysis",
     "risk tier",
@@ -86,10 +82,12 @@ _REQUIRED_COLUMNS = {"ticker", "entry_price", "quantity", "transaction_date"}
 _OPTIONAL_COLUMN_ALIASES = {
     "current price": "current_price",
     "target price": "target_price",
-    "target profit": "target_profit",
+    "target profit": "target_profit_percent",
+    "target profit %": "target_profit_percent",
     "target holding": "target_holding",
+    "stop loss": "stop_loss_price",
+    "stop loss price": "stop_loss_price",
     "trade date": "transaction_date",
-    "strike price": "strike_price",
     "action (b/s)": "action",
     "commission+stt": "commission_stt",
     "commission + stt": "commission_stt",
@@ -110,6 +108,12 @@ def _normalize_csv_headers(fieldnames: list[str] | None) -> dict[str, str]:
 def _optional_decimal(row: dict[str, str], column: str) -> Decimal | None:
     """Parse an optional money field, preserving blank cells as None."""
     value = row.get(column, "").strip()
+    return Decimal(value) if value else None
+
+
+def _optional_percent(row: dict[str, str], column: str) -> Decimal | None:
+    """Parse a percentage such as ``5`` or ``5%`` as percentage points."""
+    value = row.get(column, "").strip().rstrip("%").strip()
     return Decimal(value) if value else None
 
 
@@ -152,9 +156,11 @@ def load_positions_csv(path: Path) -> list[OpenTradePosition]:
                             "quantity": quantity,
                             "transaction_date": typed_row["transaction_date"].strip(),
                             "target_price": _optional_decimal(row, "target_price"),
-                            "target_profit_inr": _optional_decimal(row, "target_profit"),
+                            "target_profit_percent": _optional_percent(
+                                row, "target_profit_percent"
+                            ),
                             "target_holding": row.get("target_holding", "").strip() or None,
-                            "strike_price": _optional_decimal(row, "strike_price"),
+                            "stop_loss_price": _optional_decimal(row, "stop_loss_price"),
                             "action": row.get("action", "B").strip().upper() or "B",
                             "commission_stt_inr": _optional_decimal(row, "commission_stt") or Decimal("0"),
                             "reported_pnl_inr": None,
@@ -171,6 +177,7 @@ def load_positions_csv(path: Path) -> list[OpenTradePosition]:
                             "absolute_pnl_inr": Decimal("0"),
                             "percentage_pnl": Decimal("0"),
                         },
+                        "trigger": {},
                         "agent_evaluation": {
                             "technical_sentiment_summary": "Pending market refresh.",
                             "breaking_news_analysis": "Pending news refresh.",
@@ -178,6 +185,8 @@ def load_positions_csv(path: Path) -> list[OpenTradePosition]:
                         },
                     },
                 )
+                if position.user_input.target_price is None:
+                    position.user_input.target_price = calculate_target_price(position)
                 positions.append(position)
             except Exception as exc:
                 validation_errors.append(f"row {row_number}: {exc}")
@@ -243,7 +252,7 @@ def _backup_csv(path: Path) -> Path:
 
 
 def write_agent_results_csv(path: Path, result: AgenticResult) -> None:
-    """Persist agent-owned outputs without changing any target-prefixed column.
+    """Persist qualitative agent outputs without changing market snapshots.
 
     Rows are matched by input order because repeated tickers represent
     independent lots and cannot safely be matched by ticker alone.
@@ -261,47 +270,20 @@ def write_agent_results_csv(path: Path, result: AgenticResult) -> None:
 
     headers = list(original_headers)
     existing_canonical = {_normalize_csv_headers(headers).get(header, header) for header in headers}
-    for output_column in _OUTPUT_COLUMNS:
+    for output_column in _AGENT_OUTPUT_COLUMNS:
         output_canonical = _normalize_csv_headers([output_column])[output_column]
         if output_column not in headers and output_canonical not in existing_canonical:
             headers.append(output_column)
 
     header_map = _normalize_csv_headers(headers)
     output_by_canonical = {
-        "current_price": "current_price",
-        "days_high": "days_high",
-        "days_low": "days_low",
-        "net_change_percent": "net_change_%",
-        "market_session": "market_session",
-        "pnl": "pnl",
-        "percentage_pnl": "pnl_%",
         "technical_sentiment_summary": "technical_sentiment",
         "breaking_news_analysis": "breaking_news_analysis",
         "risk_tier": "risk_tier",
     }
 
     for row, position in zip(rows, result["positions"]):
-        ticker = position.user_input.ticker
-        metrics = result["market_metrics"].get(ticker)
-        if metrics is not None:
-            market_values = {
-                "current_price": metrics["current_price"],
-                "days_high": metrics["days_high"],
-                "days_low": metrics["days_low"],
-                "net_change_percent": metrics["net_change_percent"],
-                "market_session": metrics["market_session"],
-            }
-            for key, value in market_values.items():
-                canonical_column = output_by_canonical[key]
-                actual_column = next(
-                    (header for header, canonical in header_map.items() if canonical == canonical_column),
-                    canonical_column,
-                )
-                row[actual_column] = _format_csv_value(value)
-
         valuation_values = {
-            "pnl": position.current_valuation.absolute_pnl_inr,
-            "percentage_pnl": position.current_valuation.percentage_pnl,
             "technical_sentiment_summary": position.agent_evaluation.technical_sentiment_summary,
             "breaking_news_analysis": position.agent_evaluation.breaking_news_analysis,
             "risk_tier": position.agent_evaluation.risk_tier,
@@ -326,6 +308,9 @@ def write_agent_results_csv(path: Path, result: AgenticResult) -> None:
 def _apply_market_metrics(
     position: OpenTradePosition,
     metrics: MarketMovementMetrics,
+    *,
+    pnl_max_attempts: int = 2,
+    retry_delay_seconds: float = 0.1,
 ) -> OpenTradePosition | str:
     """Copy provider values into position state before deterministic PnL math."""
     updated = position.model_copy(deep=True)
@@ -333,7 +318,24 @@ def _apply_market_metrics(
     updated.live_market.days_high = metrics["days_high"]
     updated.live_market.days_low = metrics["days_low"]
     updated.live_market.net_change_percent = metrics["net_change_percent"]
-    return update_position_pnl(updated, metrics["current_price"])
+    last_error: str | None = None
+    for attempt in range(pnl_max_attempts):
+        calculated = update_position_pnl(updated, metrics["current_price"])
+        if not isinstance(calculated, str):
+            calculated.trigger = evaluate_position_trigger(calculated)
+            if calculated.trigger.status == "Stop Loss Hit":
+                calculated.agent_evaluation = calculated.agent_evaluation.model_copy(
+                    update={"risk_tier": "High"}
+                )
+            elif calculated.trigger.status == "Target Hit":
+                calculated.agent_evaluation = calculated.agent_evaluation.model_copy(
+                    update={"risk_tier": "Low"}
+                )
+            return calculated
+        last_error = calculated
+        if attempt + 1 < pnl_max_attempts:
+            time.sleep(retry_delay_seconds)
+    return last_error or "PnL calculation failed without an error message"
 
 
 def refresh_positions(positions: list[OpenTradePosition]) -> RefreshResult:
@@ -349,6 +351,10 @@ def refresh_positions(positions: list[OpenTradePosition]) -> RefreshResult:
             fetched = fetch_market_movement(
                 ticker,
                 timeout_seconds=float(os.getenv("MUDRASENSE_MARKET_TIMEOUT_SECONDS", "10")),
+                max_attempts=int(os.getenv("MUDRASENSE_MARKET_RETRY_ATTEMPTS", "3")),
+                retry_delay_seconds=float(
+                    os.getenv("MUDRASENSE_RETRY_DELAY_SECONDS", "1.0")
+                ),
             )
             if isinstance(fetched, str):
                 errors.append(fetched)
@@ -357,7 +363,12 @@ def refresh_positions(positions: list[OpenTradePosition]) -> RefreshResult:
             result = fetched
             market_metrics[ticker] = result
 
-        updated = _apply_market_metrics(position, result)
+        updated = _apply_market_metrics(
+            position,
+            result,
+            pnl_max_attempts=int(os.getenv("MUDRASENSE_PNL_RETRY_ATTEMPTS", "2")),
+            retry_delay_seconds=float(os.getenv("MUDRASENSE_RETRY_DELAY_SECONDS", "1.0")),
+        )
         if isinstance(updated, str):
             errors.append(updated)
             refreshed_positions.append(position)
@@ -382,7 +393,8 @@ def _print_report(result: RefreshResult) -> None:
         print(
             f"{ticker}: INR {position.live_market.current_price:.2f} | "
             f"PnL INR {valuation.absolute_pnl_inr:.2f} "
-            f"({valuation.percentage_pnl:.2f}%) | {session}"
+            f"({valuation.percentage_pnl:.2f}%) | {session} | "
+            f"{position.trigger.status}"
         )
 
     if result["errors"]:
@@ -504,6 +516,11 @@ def _parse_args() -> argparse.Namespace:
         help="Launch the Streamlit dashboard instead of the terminal report",
     )
     parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Fetch and print the volatile price/PnL report without writing the CSV",
+    )
+    parser.add_argument(
         "--provider",
         choices=("ollama", "groq"),
         default=os.getenv("MUDRASENSE_PROVIDER", "ollama"),
@@ -524,6 +541,8 @@ def main() -> None:
     positions = load_positions_csv(args.input)
     refreshed = refresh_positions(positions)
     _print_report(refreshed)
+    if args.report:
+        return
     agentic_result = asyncio.run(run_agentic_processes(refreshed, provider=args.provider))
     write_agent_results_csv(args.input, agentic_result)
     print(f"Agent-owned fields written to {args.input}.")

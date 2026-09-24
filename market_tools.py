@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import traceback
 from datetime import datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -22,7 +23,7 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 
-from schemas.positions import OpenTradePosition
+from schemas.positions import OpenTradePosition, PositionTrigger
 
 
 _NSE_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9&-]+$")
@@ -119,6 +120,8 @@ def fetch_market_movement(
     ticker: str,
     *,
     timeout_seconds: float = 10.0,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
 ) -> MarketMovementMetrics | str:
     """Fetch the latest daily movement metrics for an NSE ticker.
 
@@ -131,43 +134,114 @@ def fetch_market_movement(
         normalized_ticker = normalize_nse_ticker(ticker)
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-
-        history = yf.Ticker(normalized_ticker).history(
-            period="2d",
-            interval="1d",
-            auto_adjust=False,
-            timeout=timeout_seconds,
-        )
-        if history is None or history.empty:
-            raise TimeoutError(f"no market data returned for {normalized_ticker}")
-
-        current_price = _last_numeric(history["Close"], "current price")
-        days_high = _last_numeric(history["High"], "day high")
-        days_low = _last_numeric(history["Low"], "day low")
-        previous_close = (
-            _decimal(history["Close"].dropna().iloc[-2], "previous close")
-            if len(history["Close"].dropna()) >= 2
-            else current_price
-        )
-        if previous_close <= 0:
-            raise ValueError("previous close must be greater than zero")
-
-        net_change_percent = ((current_price - previous_close) / previous_close * 100).quantize(
-            _PERCENT_QUANTUM,
-            rounding=ROUND_HALF_UP,
-        )
-        captured_at = datetime.now(_IST)
-        return {
-            "ticker": normalized_ticker,
-            "current_price": current_price.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-            "days_high": days_high.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-            "days_low": days_low.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-            "net_change_percent": net_change_percent,
-            "captured_at": captured_at.isoformat(),
-            "market_session": get_market_session_status(captured_at),
-        }
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds cannot be negative")
     except Exception as exc:
         return _error_traceback("market_data_fetch_failed", normalized_ticker, exc)
+
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            history = yf.Ticker(normalized_ticker).history(
+                period="2d",
+                interval="1d",
+                auto_adjust=False,
+                timeout=timeout_seconds,
+            )
+            if history is None or history.empty:
+                raise TimeoutError(f"no market data returned for {normalized_ticker}")
+
+            current_price = _last_numeric(history["Close"], "current price")
+            days_high = _last_numeric(history["High"], "day high")
+            days_low = _last_numeric(history["Low"], "day low")
+            previous_close = (
+                _decimal(history["Close"].dropna().iloc[-2], "previous close")
+                if len(history["Close"].dropna()) >= 2
+                else current_price
+            )
+            if previous_close <= 0:
+                raise ValueError("previous close must be greater than zero")
+
+            net_change_percent = ((current_price - previous_close) / previous_close * 100).quantize(
+                _PERCENT_QUANTUM,
+                rounding=ROUND_HALF_UP,
+            )
+            captured_at = datetime.now(_IST)
+            return {
+                "ticker": normalized_ticker,
+                "current_price": current_price.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+                "days_high": days_high.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+                "days_low": days_low.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+                "net_change_percent": net_change_percent,
+                "captured_at": captured_at.isoformat(),
+                "market_session": get_market_session_status(captured_at),
+            }
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < max_attempts:
+                time.sleep(retry_delay_seconds)
+
+    return _error_traceback(
+        "market_data_fetch_failed",
+        normalized_ticker,
+        last_error or RuntimeError("unknown market data failure"),
+    )
+
+
+def evaluate_position_trigger(position: OpenTradePosition) -> PositionTrigger:
+    """Evaluate target and stop-loss conditions using authoritative runtime values."""
+    price = position.live_market.current_price
+    user_input = position.user_input
+    stop_loss_hit = (
+        user_input.stop_loss_price is not None
+        and (price <= user_input.stop_loss_price if user_input.action == "B" else price >= user_input.stop_loss_price)
+    )
+    target_price_hit = (
+        user_input.target_price is not None
+        and (price >= user_input.target_price if user_input.action == "B" else price <= user_input.target_price)
+    )
+    target_profit_hit = (
+        user_input.target_profit_percent is not None
+        and position.current_valuation.percentage_pnl >= user_input.target_profit_percent
+    )
+    if stop_loss_hit:
+        return PositionTrigger(
+            status="Stop Loss Hit",
+            reason=f"Price INR {price:.2f} reached the stop-loss level.",
+        )
+    if target_price_hit or target_profit_hit:
+        reason = "Target price reached." if target_price_hit else "Target profit reached."
+        return PositionTrigger(status="Target Hit", reason=reason)
+    return PositionTrigger()
+
+
+def calculate_target_price(position: OpenTradePosition) -> Decimal | None:
+    """Derive a target price from target PnL percentage when no price is supplied."""
+    target_percent = position.user_input.target_profit_percent
+    if target_percent is None or position.user_input.target_price is not None:
+        return position.user_input.target_price
+
+    invested_capital = (
+        position.user_input.entry_price * Decimal(position.user_input.quantity)
+    ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    target_profit = (invested_capital * target_percent / Decimal("100")).quantize(
+        _MONEY_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
+    price_delta = (
+        (target_profit + position.user_input.commission_stt_inr)
+        / Decimal(position.user_input.quantity)
+    ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    target_price = (
+        position.user_input.entry_price + price_delta
+        if position.user_input.action == "B"
+        else position.user_input.entry_price - price_delta
+    ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    if target_price <= 0:
+        raise ValueError("target profit percentage produces a non-positive target price")
+    return target_price
 
 
 def update_position_pnl(

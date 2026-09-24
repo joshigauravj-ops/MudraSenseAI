@@ -123,12 +123,16 @@ class OllamaBackend:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        if not isinstance(response, Mapping):
-            raise TypeError("Ollama returned an unexpected response")
-        message = response.get("message")
-        if not isinstance(message, Mapping):
+        if isinstance(response, Mapping):
+            message = response.get("message")
+        else:
+            message = getattr(response, "message", None)
+        if message is None:
             raise TypeError("Ollama response did not contain a message")
-        content = message.get("content")
+        if isinstance(message, Mapping):
+            content = message.get("content")
+        else:
+            content = getattr(message, "content", None)
         if not isinstance(content, str) or not content.strip():
             raise ValueError("Ollama returned an empty completion")
         return content.strip()

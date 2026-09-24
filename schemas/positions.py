@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 RiskTier = Literal["Low", "Medium", "High"]
+TriggerStatus = Literal["No Trigger", "Target Hit", "Stop Loss Hit"]
 TradeAction = Literal["B", "S"]
 
 
@@ -23,9 +24,9 @@ class UserInputPositionData(TypedDict):
     quantity: int
     transaction_date: date
     target_price: Decimal | None
-    target_profit_inr: Decimal | None
+    target_profit_percent: Decimal | None
     target_holding: str | None
-    strike_price: Decimal | None
+    stop_loss_price: Decimal | None
     action: TradeAction
     commission_stt_inr: Decimal
     reported_pnl_inr: Decimal | None
@@ -67,15 +68,20 @@ class UserInputPosition(BaseModel):
     quantity: int = Field(gt=0, description="Number of shares")
     transaction_date: date
     target_price: Decimal | None = Field(default=None, gt=0, description="User target price in INR")
-    target_profit_inr: Decimal | None = Field(
+    target_profit_percent: Decimal | None = Field(
         default=None,
-        description="User target profit in INR",
+        ge=0,
+        description="User target profit as a percentage",
     )
     target_holding: str | None = Field(
         default=None,
         description="User holding horizon, for example 30D or long-term",
     )
-    strike_price: Decimal | None = Field(default=None, gt=0, description="Optional strike price in INR")
+    stop_loss_price: Decimal | None = Field(
+        default=None,
+        gt=0,
+        description="User stop-loss trigger price in INR",
+    )
     action: TradeAction = Field(default="B", description="B for buy or S for sell")
     commission_stt_inr: Decimal = Field(
         default=Decimal("0.00"),
@@ -128,6 +134,15 @@ class CurrentValuation(BaseModel):
     percentage_pnl: Decimal = Field(description="PnL as a percentage")
 
 
+class PositionTrigger(BaseModel):
+    """Deterministic target or stop-loss state for the current snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: TriggerStatus = "No Trigger"
+    reason: str = "No target or stop-loss trigger."
+
+
 class AgentEvaluation(BaseModel):
     """Qualitative analysis produced after the numeric layers are available."""
 
@@ -146,6 +161,7 @@ class OpenTradePosition(BaseModel):
     user_input: UserInputPosition
     live_market: LiveMarketLayer
     current_valuation: CurrentValuation
+    trigger: PositionTrigger = Field(default_factory=PositionTrigger)
     agent_evaluation: AgentEvaluation
 
 
@@ -163,4 +179,5 @@ class OpenTradePositionData(TypedDict):
     user_input: UserInputPositionData
     live_market: LiveMarketLayerData
     current_valuation: CurrentValuationData
+    trigger: dict[str, str]
     agent_evaluation: AgentEvaluationData
