@@ -40,6 +40,7 @@ class AnalysisState(TypedDict, total=False):
     live_market: MarketMovementMetrics
     technical_indicators: TechnicalIndicators
     news_headlines: list[NewsHeadline]
+    relevant_documents: list[dict[str, object]]
     technical_summary: str
     news_analysis: str
     errors: list[str]
@@ -148,14 +149,16 @@ indicators or facts. If evidence is insufficient, say so explicitly. Return
 plain text only, with no bullets, JSON, or headings."""
 
 _NEWS_SYSTEM_PROMPT = """You are the Corporate News and Sentiment Analyst for an Indian NSE equity monitor.
-Review the supplied Google News RSS headlines and write a concise qualitative
-summary of material corporate developments. Filter generic market noise and
-prioritize SEBI or other regulatory filings, earnings reports, material
-corporate actions, and governance updates affecting the named stock.
+Review the supplied Google News RSS headlines and relevant company document excerpts.
+Write a concise qualitative summary of material corporate developments. Filter
+generic market noise and prioritize SEBI or other regulatory filings, earnings
+reports, material corporate actions, and governance updates affecting the named
+stock. Use the document excerpts as additional grounding for context and cite the
+relevant themes only when supported by the supplied material.
 You are forbidden to calculate, guess, forecast, or alter any stock price,
 percentage, PnL, quantity, or other numeric financial value. Use only supplied
-headlines, distinguish reported facts from uncertainty, and do not invent
-news. Return plain text only, with no bullets, JSON, or headings."""
+headlines and document excerpts, distinguish reported facts from uncertainty, and
+do not invent news. Return plain text only, with no bullets, JSON, or headings."""
 
 _RISK_CONTROL_SYSTEM_PROMPT = """You are the Risk Control Agent for an Indian NSE portfolio monitor.
 Draft a concise emergency risk-warning explanation from the supplied,
@@ -211,13 +214,17 @@ def corporate_news_node(
     *,
     backend: ChatBackend,
 ) -> AnalysisState:
-    """Filter supplied RSS headlines for material corporate developments."""
+    """Filter supplied RSS headlines and retrieval excerpts for material corporate developments."""
     ticker = state["position"].user_input.ticker
     try:
+        headlines = state.get("news_headlines", [])
+        relevant_documents = state.get("relevant_documents", [])
         user_prompt = (
             f"Stock: {ticker}\n"
             "These are the only headlines you may use:\n"
-            f"{_format_context(state.get('news_headlines', []))}"
+            f"{_format_context(headlines)}\n\n"
+            "These are the relevant company documents and excerpts to ground the analysis:\n"
+            f"{_format_context(relevant_documents)}"
         )
         return {"news_analysis": backend.complete(_NEWS_SYSTEM_PROMPT, user_prompt)}
     except Exception as exc:

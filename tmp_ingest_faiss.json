@@ -1,0 +1,27 @@
+{
+  "documents": [
+    {
+      "ticker": "RELIANCE",
+      "title": "reliance_earnings chunk 1",
+      "content": "Reliance Industries announces strong quarterly earnings and telecom expansion.",
+      "source_url": "file://C:/Development/Trading/MudraSenseAI/tmp_ingest_docs/reliance_earnings.txt",
+      "publication_date": "",
+      "document_type": "filing",
+      "chunk_id": "reliance-reliance_earnings-1"
+    }
+  ],
+  "vocabulary": [
+    "1",
+    "and",
+    "announces",
+    "chunk",
+    "earnings",
+    "expansion",
+    "filing",
+    "industries",
+    "quarterly",
+    "reliance",
+    "strong",
+    "telecom"
+  ]
+}

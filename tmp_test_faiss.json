@@ -1,0 +1,27 @@
+{
+  "documents": [
+    {
+      "ticker": "RELIANCE",
+      "title": "Reliance Industries Q1 results",
+      "content": "Reliance Industries announces strong quarterly earnings and telecom subscriber expansion.",
+      "source_url": "https://example.com/reliance-earnings",
+      "publication_date": "2024-01-15",
+      "document_type": "earnings",
+      "chunk_id": "reliance-earnings-001"
+    }
+  ],
+  "vocabulary": [
+    "and",
+    "announces",
+    "earnings",
+    "expansion",
+    "industries",
+    "q1",
+    "quarterly",
+    "reliance",
+    "results",
+    "strong",
+    "subscriber",
+    "telecom"
+  ]
+}

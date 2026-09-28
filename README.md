@@ -5,26 +5,27 @@
 [![Market](https://shields.io)]()
 [![License](https://shields.io)]()
 
-**MudraSense AI** is a production-grade, stateful multi-agent orchestrator built to track open trade positions, calculate real-time portfolio metrics, and analyze market sentiment for the **Indian Equities Market (NSE/BSE)**—completely free of cost. 
+**MudraSense AI** is a production-grade, stateful multi-agent orchestrator built to track open trade positions, calculate real-time portfolio metrics, and analyze market sentiment for the **Indian Equities Market (NSE/BSE)**—completely free of cost.
 
-By decoupling deterministic execution layers from LLM reasoning pools, the engine eliminates financial hallucinations while delivering autonomous risk management.
+By decoupling deterministic execution layers from LLM reasoning pools, the engine eliminates financial hallucinations while delivering autonomous risk management. The retrieval layer now uses live market context, ticker-scoped headlines, and a local document store as the default fallback; an optional FAISS-backed vector store can be enabled when a richer document index is needed.
 
 **Development credit:** Gaurav Joshi ([GitHub](https://github.com/joshigauravj-ops))
 
-Read the full system design, data flow, RAG explanation, guardrails, and interview
-showcase narrative in [ARCHITECTURE.md](ARCHITECTURE.md).
+Read the full system design, data flow, retrieval architecture, and guardrails in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## 🧠 Core System Workflow
 
 [ Input: Positions CSV ] ➔ [ Typed Validation ] ➔ [ yfinance + RSS Retrieval ]
+➔ [ Local Document Store / Optional FAISS Vector Index ]
 ➔ [ Pure Python PnL Math ] ➔ [ LangGraph Agents ] ➔ [ Risk Guardrail ]
 
 1. **Telemetry Retrieval:** Pulls data for NSE tickers via `yfinance` and parses current context from Google News RSS.
-2. **Deterministic Computation:** A pure Python mathematical core calculates open position profits, losses, and percentages in **INR (₹)**.
-3. **Agentic Synthesis:** LangGraph routes data to free LLM nodes (via Groq/Ollama) to extract qualitative market context.
-4. **Autonomous Guardrails:** Instantly alerts the user via webhooks or terminal banners if portfolio stop-losses are breached.
+2. **Grounded Document Retrieval:** Queries the ticker-specific local fallback store and can optionally use a FAISS-backed vector index when configured.
+3. **Deterministic Computation:** A pure Python mathematical core calculates open position profits, losses, and percentages in **INR (₹)**.
+4. **Agentic Synthesis:** LangGraph routes data to free LLM nodes (via Groq/Ollama) to extract qualitative market context grounded in retrieved headlines and document excerpts.
+5. **Autonomous Guardrails:** Instantly alerts the user via webhooks or terminal banners if portfolio stop-losses are breached.
 
 ---
 
@@ -51,10 +52,11 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-The current RSS-based retrieval is a lightweight live RAG pipeline: fresh
-headlines are retrieved for the ticker and supplied to the news agent as
-grounded context. Historical filings and vector search are documented as a
-future extension in [ARCHITECTURE.md](ARCHITECTURE.md).
+The current retrieval pipeline is a hybrid live RAG flow: fresh headlines are
+retrieved for the ticker, and the local document store provides a deterministic
+fallback for relevant company filings and excerpts. An optional FAISS-backed
+vector index can be enabled for richer historical document retrieval when
+configured in the environment.
 
 ### 2. Install and Start Ollama (Windows)
 Ollama must be installed separately from this Python project. In PowerShell:
@@ -113,7 +115,13 @@ Copy-Item .env.example .env
 Set `GROQ_API_KEY` if using Groq, or keep `MUDRASENSE_PROVIDER=ollama` for local
 inference. `.env` is git-ignored and must never contain committed credentials.
 The template also contains model names, Ollama host, input path, network timeouts,
-and supervisor thresholds.
+supervisor thresholds, and optional retrieval settings such as the local fallback,
+`MUDRASENSE_READ_BACKEND`, and FAISS index path when enabled.
+
+To use the optional vector back end, set the provider to `faiss` and provide a
+valid `MUDRASENSE_FAISS_INDEX_PATH` when an index file has been created. If that
+backend is unavailable, the project automatically falls back to the local
+retrieval store without failing the workflow.
 
 ### 5. Create Your Local Positions CSV
 The repository includes only a template. Copy it to a local, ignored file and
@@ -197,7 +205,3 @@ changes the runtime risk tier to `Low`; a stop-loss changes it to `High`. The
 dashboard and terminal report show the trigger, but no order is placed
 automatically.
 
-When `target price` is blank but `target profit %` is supplied, the runtime
-calculates a target price from entry price, quantity, commission/STT, and the
-requested percentage. The derived value is used for reports and trigger checks;
-the input CSV remains unchanged.

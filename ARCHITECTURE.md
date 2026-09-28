@@ -7,7 +7,7 @@
 MudraSense AI is a local-first portfolio intelligence system for open Indian NSE equity positions. It combines deterministic financial computation with retrieval-augmented generative AI:
 
 - Python owns market data normalization, PnL arithmetic, validation, and risk thresholds.
-- Retrieval tools obtain current market movement and Google News RSS headlines.
+- Retrieval tools obtain current market movement, Google News RSS headlines, and ticker-scoped document excerpts from a local fallback store or an optional FAISS-backed vector index.
 - Specialized LLM agents produce qualitative technical and corporate-news summaries.
 - LangGraph coordinates the agent nodes and routes triggered portfolios to a risk-control path.
 - Results are persisted into the user's local CSV while user-owned target fields remain unchanged.
@@ -26,6 +26,7 @@ flowchart LR
     S --> T[Technical Analyst]
     S --> N[Corporate News Agent]
     N1[Google News RSS retrieval] --> N
+    N2[Local fallback store\nOptional FAISS vector index] --> N
     T --> G[LangGraph state]
     N --> G
     G --> R{Supervisor guardrail}
@@ -42,9 +43,12 @@ flowchart LR
 | `main.py` | Startup orchestration, CSV loading, refresh, agent handoff, CSV write-back | CLI and Streamlit launcher |
 | `schemas/positions.py` | Typed contracts and validation | Pydantic models and `TypedDict` payloads |
 | `market_tools.py` | Market retrieval, RSS retrieval, deterministic calculations | `yfinance`, `requests`, BeautifulSoup, `Decimal` |
+| `document_retrieval.py` | Retrieval orchestration with local fallback and optional external backend | local store + optional backend adapter |
+| `vector_search.py` | Deterministic local search layer for ticker-scoped document hits | lexical fallback retrieval |
+| `faiss_vector_store.py` | Optional FAISS-backed vector retrieval | local vector search path when enabled |
 | `analysis_graph.py` | Agent adapters, prompts, graph nodes, guardrail routing | LangGraph, Groq, Ollama |
 | `dashboard.py` | Human-facing workflow interface | Streamlit |
-| `.env.example` | Configuration contract | Provider, models, timeouts, thresholds |
+| `.env.example` | Configuration contract | Provider, models, timeouts, thresholds, optional FAISS settings |
 | `examples/open_positions.template.csv` | Safe input template | User-owned input columns and examples |
 
 ## 4. End-to-End Data Flow
@@ -66,7 +70,7 @@ Invalid rows stop the workflow before any network or agent activity begins.
 
 `market_tools.py` retrieves daily market data through `yfinance` using NSE symbols with the `.NS` suffix. It records current price, high, low, net change, and the IST market-session status.
 
-Google News RSS is retrieved for each ticker and parsed into up to five typed headline/timestamp records. TLS verification uses `certifi`, and network failures return structured error strings.
+Google News RSS is retrieved for each ticker and parsed into up to five typed headline/timestamp records. TLS verification uses `certifi`, and network failures return structured error strings. In parallel, the project retrieves relevant document excerpts using a ticker-scoped local fallback store, and it can optionally use a FAISS-backed vector index whenever that backend is configured in the environment.
 
 ### Step 3: Compute financial values deterministically
 
@@ -89,7 +93,7 @@ This makes the numerical output reproducible and auditable.
 The graph runs two focused qualitative nodes:
 
 1. **Technical Analyst** receives authoritative market metrics and indicators. It produces exactly two sentences describing immediate momentum as overbought, oversold, or neither.
-2. **Corporate News and Sentiment Agent** receives only retrieved RSS headlines. It filters generic noise and prioritizes SEBI/regulatory filings, earnings, corporate actions, and governance updates.
+2. **Corporate News and Sentiment Agent** receives retrieved RSS headlines plus relevant ticker-scoped document excerpts from the local fallback store or the optional vector backend. It filters generic noise and prioritizes SEBI/regulatory filings, earnings, corporate actions, and governance updates.
 
 Both prompts explicitly prohibit guessing or changing numerical financial data. The provider can be Groq or local Ollama, configured through `.env`.
 
@@ -136,7 +140,7 @@ agents or persisting them.
 
 ## 5. Where RAG Fits
 
-This project currently implements **live retrieval-augmented generation**, not a historical vector-search platform.
+This project implements a hybrid retrieval pipeline: live market and news retrieval plus ticker-scoped document retrieval from a local fallback store, with an optional FAISS-backed vector layer when configured.
 
 The retrieval pipeline is:
 
@@ -144,21 +148,23 @@ The retrieval pipeline is:
 sequenceDiagram
     participant Y as yfinance
     participant G as Google News RSS
+    participant R as Local store / FAISS backend
     participant P as Python state engine
     participant L as LLM agent
 
     Y->>P: Current market facts
     G->>P: Top five ticker headlines
-    P->>L: Typed facts + retrieved headlines
+    R->>P: Relevant document excerpts for ticker
+    P->>L: Typed facts + retrieved headlines + grounded excerpts
     L->>P: Qualitative explanation only
     P->>P: Preserve numeric source of truth
 ```
 
-The important RAG principle is that the model receives grounded context retrieved for the current ticker instead of answering from general pretraining memory. The news agent can cite the supplied headlines in its reasoning, while the technical agent works from the latest calculated values.
+The important RAG principle is that the model receives grounded context retrieved for the current ticker instead of answering from general pretraining memory. The news agent can cite the supplied headlines and relevant excerpts in its reasoning, while the technical agent works from the latest calculated values.
 
 ### Practical future RAG extension
 
-A production version could add a document-ingestion layer for NSE circulars, SEBI filings, earnings releases, and company announcements:
+The local fallback store is already the default safe retrieval path. A production version can layer in a FAISS or other vector-backed index for historical filings and announcements:
 
 1. Fetch documents with source URL and publication date.
 2. Extract and clean text.
@@ -168,7 +174,7 @@ A production version could add a document-ingestion layer for NSE circulars, SEB
 6. Pass retrieved chunks to the news agent with citations.
 7. Store the source references alongside the summary for auditability.
 
-The current RSS retrieval is a useful first production slice because it delivers fresh context without requiring a paid API or a vector database.
+The current local document store and live RSS retrieval provide a practical first production slice because they work without a required paid API or external index.
 
 ## 6. Why This Is Agentic AI
 
@@ -195,25 +201,13 @@ The LLMs are reasoning components inside a controlled workflow, not the system o
 - Agent prompts prohibit numerical hallucination.
 - Target columns are immutable from the agent write-back path.
 
-## 8. Interview Showcase Narrative
-
-> I built a local-first agentic portfolio monitor for Indian equities. The design separates deterministic computation from generative reasoning: Python validates positions, retrieves NSE data, calculates net PnL, and enforces risk thresholds, while specialized LangGraph nodes summarize technical momentum and corporate news. Google News RSS provides live retrieved context for the news agent, making the current system a lightweight RAG pipeline. A supervisor node evaluates every open lot and conditionally routes breached portfolios to a Risk Control Agent, which drafts an alert without being allowed to alter financial numbers. The architecture is auditable because every model output is grounded in typed state, and the CSV preserves user intent while receiving refreshed market and analysis fields.
-
-### Strong follow-up points
-
-- Why not let the LLM calculate PnL? Numerical reproducibility, auditability, and risk control.
-- Why use multiple agents? Smaller role-specific prompts are easier to evaluate and constrain.
-- Why LangGraph? Explicit state transitions and conditional routing make the workflow observable.
-- Is this full RAG? It is live RSS-based RAG today; a vector store for filings is the natural next extension.
-- How would it scale? Replace CSV persistence with PostgreSQL, add a document/vector store, introduce job scheduling, and send signed webhook notifications.
-
-## 9. Production Evolution
+## 8. Production Evolution
 
 The next architecture steps are:
 
 1. Replace CSV persistence with PostgreSQL while retaining the Pydantic contracts.
-2. Add a document store and vector database for historical filings and news.
+2. Extend the optional FAISS or vector-store path with a production document ingestion pipeline for filings and news.
 3. Add source citations and confidence metadata to agent outputs.
 4. Add real Discord/Telegram integrations with secrets from environment or a secret manager.
-5. Add tests for market-data adapters, graph routing, prompt contracts, and persistence.
+5. Add tests for market-data adapters, graph routing, prompt contracts, retrieval quality, and persistence.
 6. Add observability for latency, provider errors, retrieval quality, and alert decisions.

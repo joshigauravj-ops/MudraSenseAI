@@ -25,6 +25,7 @@ from market_tools import (
     update_position_pnl,
     evaluate_position_trigger,
 )
+from document_retrieval import build_external_read_backend, retrieve_relevant_documents
 from schemas.positions import OpenTradePosition
 from analysis_graph import (
     GroqBackend,
@@ -457,6 +458,18 @@ async def run_agentic_processes(
             updated_positions.append(position)
             continue
 
+        query_terms = " ".join(
+            headline.get("title", "")
+            for headline in news_headlines
+            if isinstance(headline, dict)
+        )
+        relevant_documents = retrieve_relevant_documents(
+            position.user_input.ticker,
+            query_terms or "company updates earnings filing",
+            external_backend=build_external_read_backend(),
+            top_k=5,
+        )
+
         graph = build_analysis_graph(
             technical_backend=backend,
             news_backend=backend,
@@ -467,6 +480,7 @@ async def run_agentic_processes(
                 "live_market": metrics,
                 "technical_indicators": {},
                 "news_headlines": news_headlines,
+                "relevant_documents": relevant_documents,
             }
         )
         errors.extend(agent_state.get("errors", []))
