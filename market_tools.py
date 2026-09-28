@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 import traceback
@@ -34,6 +35,17 @@ _NSE_OPEN = time(9, 15)
 _NSE_CLOSE = time(15, 30)
 
 MarketSessionStatus = Literal["Live Intraday", "Post-Market Close"]
+
+
+class PriceBar(TypedDict):
+    """Validated OHLCV candle for chart rendering."""
+
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
 
 
 class MarketMovementMetrics(TypedDict):
@@ -116,6 +128,41 @@ def _last_numeric(series: object, field_name: str) -> Decimal:
     return _decimal(values.iloc[-1], field_name)
 
 
+def _build_market_metric_payload(
+    ticker: str,
+    history: object,
+) -> MarketMovementMetrics:
+    """Convert a yfinance history payload into the standardized market metrics format."""
+    if history is None or getattr(history, "empty", True):
+        raise TimeoutError(f"no market data returned for {ticker}")
+
+    current_price = _last_numeric(history["Close"], "current price")
+    days_high = _last_numeric(history["High"], "day high")
+    days_low = _last_numeric(history["Low"], "day low")
+    previous_close = (
+        _decimal(history["Close"].dropna().iloc[-2], "previous close")
+        if len(history["Close"].dropna()) >= 2
+        else current_price
+    )
+    if previous_close <= 0:
+        raise ValueError("previous close must be greater than zero")
+
+    net_change_percent = ((current_price - previous_close) / previous_close * 100).quantize(
+        _PERCENT_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
+    captured_at = datetime.now(_IST)
+    return {
+        "ticker": ticker,
+        "current_price": current_price.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+        "days_high": days_high.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+        "days_low": days_low.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+        "net_change_percent": net_change_percent,
+        "captured_at": captured_at.isoformat(),
+        "market_session": get_market_session_status(captured_at),
+    }
+
+
 def fetch_market_movement(
     ticker: str,
     *,
@@ -150,34 +197,7 @@ def fetch_market_movement(
                 auto_adjust=False,
                 timeout=timeout_seconds,
             )
-            if history is None or history.empty:
-                raise TimeoutError(f"no market data returned for {normalized_ticker}")
-
-            current_price = _last_numeric(history["Close"], "current price")
-            days_high = _last_numeric(history["High"], "day high")
-            days_low = _last_numeric(history["Low"], "day low")
-            previous_close = (
-                _decimal(history["Close"].dropna().iloc[-2], "previous close")
-                if len(history["Close"].dropna()) >= 2
-                else current_price
-            )
-            if previous_close <= 0:
-                raise ValueError("previous close must be greater than zero")
-
-            net_change_percent = ((current_price - previous_close) / previous_close * 100).quantize(
-                _PERCENT_QUANTUM,
-                rounding=ROUND_HALF_UP,
-            )
-            captured_at = datetime.now(_IST)
-            return {
-                "ticker": normalized_ticker,
-                "current_price": current_price.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-                "days_high": days_high.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-                "days_low": days_low.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP),
-                "net_change_percent": net_change_percent,
-                "captured_at": captured_at.isoformat(),
-                "market_session": get_market_session_status(captured_at),
-            }
+            return _build_market_metric_payload(normalized_ticker, history)
         except Exception as exc:
             last_error = exc
             if attempt + 1 < max_attempts:
@@ -188,6 +208,115 @@ def fetch_market_movement(
         normalized_ticker,
         last_error or RuntimeError("unknown market data failure"),
     )
+
+
+def fetch_market_movements_batch(
+    tickers: list[str],
+    *,
+    timeout_seconds: float = 10.0,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
+) -> dict[str, MarketMovementMetrics | str]:
+    """Fetch multiple ticker metrics in one bulk yfinance request when possible.
+
+    This lowers network chatter and reduces the number of active threads for large
+    portfolios by reusing a single provider batch call instead of one call per ticker.
+    """
+    normalized_tickers: list[str] = []
+    errors: dict[str, str] = {}
+    for raw_ticker in tickers:
+        try:
+            normalized = normalize_nse_ticker(raw_ticker)
+        except Exception as exc:
+            errors[raw_ticker] = _error_traceback("market_data_fetch_failed", raw_ticker, exc)
+            continue
+        if normalized not in normalized_tickers:
+            normalized_tickers.append(normalized)
+
+    if not normalized_tickers:
+        return errors
+
+    batch: dict[str, MarketMovementMetrics | str] = {}
+    for attempt in range(max_attempts):
+        try:
+            bundle = yf.Tickers(" ".join(normalized_tickers))
+            for ticker in normalized_tickers:
+                try:
+                    history = bundle.tickers[ticker].history(
+                        period="2d",
+                        interval="1d",
+                        auto_adjust=False,
+                        timeout=timeout_seconds,
+                    )
+                    batch[ticker] = _build_market_metric_payload(ticker, history)
+                except Exception as exc:
+                    batch[ticker] = _error_traceback("market_data_fetch_failed", ticker, exc)
+            return batch
+        except Exception as exc:
+            if attempt + 1 < max_attempts:
+                time.sleep(retry_delay_seconds)
+                continue
+            for ticker in normalized_tickers:
+                batch[ticker] = _error_traceback("market_data_fetch_failed", ticker, exc)
+            return batch
+
+    return batch
+
+
+def fetch_price_history(
+    ticker: str,
+    *,
+    period: str = "1mo",
+    interval: str = "1d",
+    timeout_seconds: float = 10.0,
+) -> list[PriceBar] | str:
+    """Fetch validated OHLCV bars for a ticker chart."""
+    normalized_ticker = ticker
+    try:
+        normalized_ticker = normalize_nse_ticker(ticker)
+        if period not in {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"}:
+            raise ValueError("unsupported chart period")
+        if interval not in {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "1wk"}:
+            raise ValueError("unsupported chart interval")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than zero")
+
+        history = yf.Ticker(normalized_ticker).history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            timeout=timeout_seconds,
+        )
+        if history is None or history.empty:
+            raise TimeoutError(f"no price history returned for {normalized_ticker}")
+
+        bars: list[PriceBar] = []
+        for timestamp, row in history.iterrows():
+            try:
+                open_price, high_price, low_price, close_price = (
+                    float(row[column]) for column in ("Open", "High", "Low", "Close")
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in (open_price, high_price, low_price, close_price)):
+                continue
+            volume_value = row.get("Volume", 0)
+            volume = int(volume_value) if math.isfinite(float(volume_value or 0)) else 0
+            bars.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                }
+            )
+        if not bars:
+            raise ValueError(f"no complete OHLC bars returned for {normalized_ticker}")
+        return bars
+    except Exception as exc:
+        return _error_traceback("price_history_fetch_failed", normalized_ticker, exc)
 
 
 def evaluate_position_trigger(position: OpenTradePosition) -> PositionTrigger:
@@ -354,3 +483,37 @@ async def fetch_breaking_news(
         return await asyncio.to_thread(_fetch_news_sync, normalized_ticker, timeout_seconds)
     except Exception as exc:
         return _error_traceback("news_fetch_failed", normalized_ticker, exc)
+
+
+async def fetch_breaking_news_batch(
+    tickers: list[str],
+    *,
+    timeout_seconds: float = 10.0,
+    max_concurrent: int = 5,
+) -> dict[str, list[NewsHeadline] | str]:
+    """Fetch RSS headlines for multiple tickers with bounded concurrency.
+
+    This keeps the news pipeline efficient without spawning unbounded threads for
+    every position in a large watchlist.
+    """
+    if not tickers:
+        return {}
+
+    semaphore = asyncio.Semaphore(max(1, max_concurrent))
+
+    async def fetch_one(ticker: str):
+        async with semaphore:
+            return await fetch_breaking_news(ticker, timeout_seconds=timeout_seconds)
+
+    results = await asyncio.gather(
+        *(fetch_one(ticker) for ticker in tickers),
+        return_exceptions=True,
+    )
+
+    payload: dict[str, list[NewsHeadline] | str] = {}
+    for ticker, result in zip(tickers, results):
+        if isinstance(result, Exception):
+            payload[ticker] = _error_traceback("news_fetch_failed", ticker, result)
+        else:
+            payload[ticker] = result
+    return payload

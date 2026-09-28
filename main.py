@@ -19,7 +19,9 @@ from dotenv import load_dotenv
 from market_tools import (
     MarketMovementMetrics,
     fetch_breaking_news,
+    fetch_breaking_news_batch,
     fetch_market_movement,
+    fetch_market_movements_batch,
     calculate_target_price,
     normalize_nse_ticker,
     update_position_pnl,
@@ -413,6 +415,172 @@ def _create_backend(provider: str):
     raise ValueError(f"unsupported provider: {provider}")
 
 
+def resolve_refresh_cycle(
+    *,
+    price_refresh_seconds: float | None = None,
+    alert_refresh_seconds: float | None = None,
+    max_concurrent_tickers: int | None = None,
+) -> tuple[float, float, int]:
+    """Return validated scheduling values for market and alert loops."""
+    price_interval = float(
+        price_refresh_seconds if price_refresh_seconds is not None else os.getenv("MUDRASENSE_PRICE_REFRESH_SECONDS", "60")
+    )
+    alert_interval = float(
+        alert_refresh_seconds if alert_refresh_seconds is not None else os.getenv("MUDRASENSE_ALERT_REFRESH_SECONDS", "300")
+    )
+    max_parallel = int(
+        max_concurrent_tickers if max_concurrent_tickers is not None else os.getenv("MUDRASENSE_MAX_CONCURRENT_TICKERS", "10")
+    )
+
+    if price_interval <= 0:
+        raise ValueError("MUDRASENSE_PRICE_REFRESH_SECONDS must be greater than zero")
+    if alert_interval <= 0:
+        raise ValueError("MUDRASENSE_ALERT_REFRESH_SECONDS must be greater than zero")
+    if max_parallel <= 0:
+        raise ValueError("MUDRASENSE_MAX_CONCURRENT_TICKERS must be greater than zero")
+    return price_interval, alert_interval, max_parallel
+
+
+async def refresh_positions_async(
+    positions: list[OpenTradePosition],
+    *,
+    timeout_seconds: float | None = None,
+    max_attempts: int | None = None,
+    retry_delay_seconds: float | None = None,
+    max_concurrent_tickers: int | None = None,
+) -> RefreshResult:
+    """Refresh all unique tickers concurrently while preserving per-lot output ordering."""
+    timeout = float(
+        timeout_seconds if timeout_seconds is not None else os.getenv("MUDRASENSE_MARKET_TIMEOUT_SECONDS", "10")
+    )
+    max_retries = int(
+        max_attempts if max_attempts is not None else os.getenv("MUDRASENSE_MARKET_RETRY_ATTEMPTS", "3")
+    )
+    retry_delay = float(
+        retry_delay_seconds if retry_delay_seconds is not None else os.getenv("MUDRASENSE_RETRY_DELAY_SECONDS", "1.0")
+    )
+    concurrency_limit = max(
+        1,
+        int(
+            max_concurrent_tickers if max_concurrent_tickers is not None else os.getenv("MUDRASENSE_MAX_CONCURRENT_TICKERS", "10")
+        ),
+    )
+
+    grouped: dict[str, list[OpenTradePosition]] = {}
+    for position in positions:
+        grouped.setdefault(position.user_input.ticker, []).append(position)
+
+    semaphore = asyncio.Semaphore(concurrency_limit)
+
+    async def fetch_batch(tickers: list[str]):
+        async with semaphore:
+            return await asyncio.to_thread(
+                fetch_market_movements_batch,
+                tickers,
+                timeout_seconds=timeout,
+                max_attempts=max_retries,
+                retry_delay_seconds=retry_delay,
+            )
+
+    batch_results = await asyncio.gather(
+        *(fetch_batch(list(tickers)) for tickers in [list(grouped.keys())]),
+        return_exceptions=True,
+    )
+
+    market_metrics: dict[str, MarketMovementMetrics] = {}
+    errors: list[str] = []
+    refreshed_positions: list[OpenTradePosition] = []
+
+    for batch_result in batch_results:
+        if isinstance(batch_result, Exception):
+            errors.append(f"batch refresh failed: {batch_result}")
+            continue
+        for ticker, result in batch_result.items():
+            if isinstance(result, str):
+                errors.append(result)
+                continue
+            market_metrics[ticker] = result
+
+    for position in positions:
+        ticker = position.user_input.ticker
+        metrics = market_metrics.get(ticker)
+        if metrics is None:
+            refreshed_positions.append(position)
+            continue
+        updated = _apply_market_metrics(
+            position,
+            metrics,
+            pnl_max_attempts=int(os.getenv("MUDRASENSE_PNL_RETRY_ATTEMPTS", "2")),
+            retry_delay_seconds=float(os.getenv("MUDRASENSE_RETRY_DELAY_SECONDS", "1.0")),
+        )
+        if isinstance(updated, str):
+            errors.append(updated)
+            refreshed_positions.append(position)
+        else:
+            refreshed_positions.append(updated)
+
+    return {
+        "positions": refreshed_positions,
+        "market_metrics": market_metrics,
+        "errors": errors,
+    }
+
+
+async def run_monitor_loop(
+    positions: list[OpenTradePosition],
+    *,
+    provider: str,
+    price_refresh_seconds: float | None = None,
+    alert_refresh_seconds: float | None = None,
+) -> None:
+    """Run a long-lived monitoring loop with independent price and alert cycles."""
+    price_interval, alert_interval, max_parallel = resolve_refresh_cycle(
+        price_refresh_seconds=price_refresh_seconds,
+        alert_refresh_seconds=alert_refresh_seconds,
+    )
+    current_positions = list(positions)
+    current_metrics: dict[str, MarketMovementMetrics] = {}
+    last_price_refresh = 0.0
+    last_alert_refresh = 0.0
+    loop = asyncio.get_running_loop()
+
+    while True:
+        now = loop.time()
+        if now - last_price_refresh >= price_interval:
+            current_result = await refresh_positions_async(
+                current_positions,
+                max_concurrent_tickers=max_parallel,
+            )
+            current_positions = list(current_result["positions"])
+            current_metrics = current_result["market_metrics"]
+            _print_report(current_result)
+            last_price_refresh = now
+
+        if now - last_alert_refresh >= alert_interval and current_positions:
+            agentic_result = await run_agentic_processes(
+                {
+                    "positions": current_positions,
+                    "market_metrics": current_metrics,
+                    "errors": [],
+                },
+                provider=provider,
+            )
+            current_positions = list(agentic_result["positions"])
+            current_metrics = agentic_result["market_metrics"]
+            if agentic_result["errors"]:
+                print(f"Alert cycle messages: {len(agentic_result['errors'])}")
+                for error in agentic_result["errors"]:
+                    print(error)
+            last_alert_refresh = now
+
+        sleep_seconds = min(
+            5.0,
+            max(0.1, price_interval - (now - last_price_refresh)),
+            max(0.1, alert_interval - (now - last_alert_refresh)),
+        )
+        await asyncio.sleep(sleep_seconds)
+
+
 async def run_agentic_processes(
     result: RefreshResult,
     *,
@@ -431,25 +599,21 @@ async def run_agentic_processes(
             "errors": errors,
         }
 
-    news_results = await asyncio.gather(
-        *(
-            fetch_breaking_news(
-                position.user_input.ticker,
-                timeout_seconds=float(os.getenv("MUDRASENSE_NEWS_TIMEOUT_SECONDS", "10")),
-            )
-            for position in positions
-        ),
-        return_exceptions=True,
+    ticker_news = await fetch_breaking_news_batch(
+        [position.user_input.ticker for position in positions],
+        timeout_seconds=float(os.getenv("MUDRASENSE_NEWS_TIMEOUT_SECONDS", "10")),
+        max_concurrent=max(1, int(os.getenv("MUDRASENSE_MAX_CONCURRENT_TICKERS", "10"))),
     )
     updated_positions: list[OpenTradePosition] = []
     market_data = result["market_metrics"]
-    for position, news_result in zip(positions, news_results):
-        if isinstance(news_result, Exception):
-            news_headlines = []
-            errors.append(f"{position.user_input.ticker} news process failed: {news_result}")
-        elif isinstance(news_result, str):
+    for position in positions:
+        news_result = ticker_news.get(position.user_input.ticker, [])
+        if isinstance(news_result, str):
             news_headlines = []
             errors.append(news_result)
+        elif isinstance(news_result, Exception):
+            news_headlines = []
+            errors.append(f"{position.user_input.ticker} news process failed: {news_result}")
         else:
             news_headlines = news_result
 
@@ -540,6 +704,23 @@ def _parse_args() -> argparse.Namespace:
         default=os.getenv("MUDRASENSE_PROVIDER", "ollama"),
         help="Free inference backend used after market refresh (default: ollama)",
     )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run the long-lived refresh loop with price and alert schedules enabled",
+    )
+    parser.add_argument(
+        "--price-refresh-seconds",
+        type=float,
+        default=float(os.getenv("MUDRASENSE_PRICE_REFRESH_SECONDS", "60")),
+        help="Seconds between price refresh cycles for the watch loop",
+    )
+    parser.add_argument(
+        "--alert-refresh-seconds",
+        type=float,
+        default=float(os.getenv("MUDRASENSE_ALERT_REFRESH_SECONDS", "300")),
+        help="Seconds between alert/risk evaluation cycles for the watch loop",
+    )
     return parser.parse_args()
 
 
@@ -553,6 +734,17 @@ def main() -> None:
         return
 
     positions = load_positions_csv(args.input)
+    if args.watch:
+        asyncio.run(
+            run_monitor_loop(
+                positions,
+                provider=args.provider,
+                price_refresh_seconds=args.price_refresh_seconds,
+                alert_refresh_seconds=args.alert_refresh_seconds,
+            )
+        )
+        return
+
     refreshed = refresh_positions(positions)
     _print_report(refreshed)
     if args.report:
